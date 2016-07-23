@@ -215,14 +215,13 @@ class zhihuCrawler(CrawlSpider):
 
     def parse_page(self, response):
         sel = Selector(response)
-        href = sel.xpath('//a[@class="zu-top-nav-userinfo"]/@href').extract()[0]
+        href = sel.xpath('//a[@class="top-nav-profile-dropdown"]/li[1]/a/@href').extract()[0]
         print('href----->', href)
         cookie_jar = response.meta['cookie_jar']
         request = Request(self.host_url + href, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
                           callback=self.people_page)
         cookie_jar.add_cookie_header(request)
         pass
-
 
     def people_page(self, response):
         sel = Selector(response)
@@ -249,7 +248,6 @@ class zhihuCrawler(CrawlSpider):
         followees = followings[0]  # 关注的链接
         followers = followings[1]  # 被关注
         pass
-
 
     def topics_page(self, response):
         sel = Selector(response)
