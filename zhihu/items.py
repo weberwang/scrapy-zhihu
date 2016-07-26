@@ -10,5 +10,13 @@ import scrapy
 
 class ZhihuItem(scrapy.Item):
     # define the fields for your item here like:
-    # name = scrapy.Field()
+    name = scrapy.Field()
+    business = scrapy.Field()
+    location = scrapy.Field()
+    topics = scrapy.Field()
     pass
+
+class TopicItem(scrapy.Item):
+    topic_id = scrapy.Field()
+    topic_name = scrapy.Field()
+    topic_answers = scrapy.Field()

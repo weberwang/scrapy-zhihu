@@ -1,4 +1,5 @@
 import zhihu.settings as projectsetting
+from zhihu.items import ZhihuItem
 
 import scrapy
 from scrapy import signals
@@ -10,6 +11,8 @@ from scrapy.spiders import CrawlSpider, Rule
 
 import os
 import json
+import time
+import sys
 
 from http.cookiejar import Cookie
 
@@ -17,6 +20,9 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+if sys.platform == 'win32':
+    from win32api import GetSystemMetrics
 
 
 class zhihuCrawler(CrawlSpider):
@@ -41,6 +47,8 @@ class zhihuCrawler(CrawlSpider):
     _xsrf = ''
     cookie_jar = CookieJar()
     driver = None
+    login_cookies = None
+    login_cookies_dict = None
 
     # rules = (
     #     Rule(SgmlLinkExtractor(allow=(r'/question/\d+',)), follow=True),
@@ -61,24 +69,29 @@ class zhihuCrawler(CrawlSpider):
 
     def start_requests(self):
         _driver = webdriver.PhantomJS(service_log_path='./phantomjs.log')
+        _driver.set_window_size(GetSystemMetrics(0), GetSystemMetrics(1))
         self.driver = _driver
-        _driver.implicitly_wait(12)
-        _driver.get("https://www.zhihu.com/#signin")
-        # wait = WebDriverWait(driver, 12)  # 等待
-        _xsrf = _driver.find_element_by_xpath('//input[@name="_xsrf"]')
-        _xsrf = _xsrf.get_attribute('value')
-        print('_xsrf------->', _xsrf)
-        cookies = self.getcookies()
+        (cookies, expires) = self.getcookies()
+        if expires < time.time():
+            expires = False
+            print('cookie过期')
         print(cookies)
-        if cookies:
+        if cookies and expires:
             self.cookie_jar = CookieJar()
-            self.cookie_jar.set_cookie(cookies)
+            for key in cookies:
+                self.cookie_jar.set_cookie(cookies[key])
             for url in self.start_urls:
                 requset = Request(url, headers=self.headers,
                                   meta={'dont_merge_cookies': True, 'cookie_jar': self.cookie_jar},
                                   callback=self.parse_page)
                 self.cookie_jar.add_cookie_header(requset)
-            return
+                return [requset]
+        _driver.get("https://www.zhihu.com/#signin")
+        # wait = WebDriverWait(driver, 12)  # 等待
+        time.sleep(8)  # 等待页面加载完毕
+        _xsrf = _driver.find_element_by_xpath('//input[@name="_xsrf"]')
+        _xsrf = _xsrf.get_attribute('value')
+        print('_xsrf------->', _xsrf)
         input_wrapper = _driver.find_element_by_xpath('//div[@data-za-module="SignInForm"]')
         # iCaptcha = True
         # 等待验证码加载完成
@@ -130,7 +143,7 @@ class zhihuCrawler(CrawlSpider):
         formdata = {'_xsrf': _xsrf,
                     'password': projectsetting.PASS_WORD,  # 你的密码
                     'captcha_type': 'cn',
-                    'remember_me': 'false',
+                    'remember_me': 'true',
                     'email': projectsetting.USER_NAME}  # 你的账号
 
         if captcha != None:
@@ -149,8 +162,6 @@ class zhihuCrawler(CrawlSpider):
             return
         self.cookie_jar = response.meta.setdefault('cookie_jar', CookieJar())
         self.cookie_jar.extract_cookies(response, response.request)
-        print('cookies----->', self.cookie_jar._cookies)
-        self.savecookies(self.cookie_jar._cookies)
         for url in self.start_urls:
             requset = Request(url, headers=self.headers,
                               meta={'dont_merge_cookies': True, 'cookie_jar': self.cookie_jar},
@@ -160,18 +171,19 @@ class zhihuCrawler(CrawlSpider):
         pass
 
     def savecookies(self, cookies):
+        copyCookie = dict()
         with open('login_cookie.json', 'w') as cookiesfile:
             def convterall(cookies):
                 for key in cookies.keys():
                     value = cookies.get(key)
-                    print(type(value))
                     if isinstance(value, Cookie):
-                        cookies[key] = self.class2str(value)
+                        copyCookie[key] = self.class2str(value)
                     elif isinstance(value, dict):
                         convterall(value)
 
             convterall(cookies)
-            cookiesfile.write(json.dumps(cookies))
+            self.login_cookies_dict = copyCookie
+            cookiesfile.write(json.dumps(copyCookie))
         pass
 
     def class2str(self, dictdata):
@@ -181,80 +193,135 @@ class zhihuCrawler(CrawlSpider):
         pass
 
     def dict2cookie(self, cookie_dict):
-        for key in cookie_dict.keys():
-            for nextkey in cookie_dict[key].keys():
-                if nextkey == '/':
-                    cookies = cookie_dict[key][nextkey]
-                    result = {}
-                    for item in cookies.items():
-                        param = ''
-                        for key in item[1]:
-                            value = item[1][key]
-                            if type(value) == str:
-                                value = "'" + value + "'"
-                            if key[0] == '_':
-                                key = key[1:]
-                            param += '{0}={1},'.format(key, value)
-                        param = param[0:-1]
-                        evalstr = 'Cookie({0})'.format(param)
-                        result[item[0]] = eval(evalstr)
-
-        return {'.zhihu.com': {'/': result}}
+        result = {}
+        for item in cookie_dict.items():
+            param = ''
+            for key in item[1]:
+                value = item[1][key]
+                if type(value) == str:
+                    value = "'" + value + "'"
+                if key[0] == '_':
+                    key = key[1:]
+                param += '{0}={1},'.format(key, value)
+            param = param[0:-1]
+            evalstr = 'Cookie({0})'.format(param)
+            result[item[0]] = eval(evalstr)
+        return result
+        # return {'.zhihu.com': {'/': result}}
 
     def getcookies(self):
+        expires = 0
+        if self.login_cookies:
+            for key in self.login_cookies:
+                expires = self.login_cookies[key].expires
+                break
+            return (self.login_cookies, expires)
         if not os.path.exists('login_cookie.json'):
-            return None
-        with open('login_cookie.json') as cookiesfile:
+            return (None, 0)
+        with open('login_cookie.json', encoding='utf-8') as cookiesfile:
             cookiesstr = cookiesfile.read()
             if cookiesstr == '' or cookiesstr == None:
-                return None
-            cookies = cookiesfile.read()
-            cookies = json.loads(cookies, encoding='utf-8')
-            return self.dict2cookie(cookies)
+                return (None, 0)
+            cookies = json.loads(cookiesstr)
+            self.login_cookies = self.dict2cookie(cookies)
+            expires = 0
+            if self.login_cookies:
+                for key in self.login_cookies:
+                    expires = self.login_cookies[key].expires
+                    if expires != None:
+                        break
+            return (self.login_cookies, expires)
         pass
 
     def parse_page(self, response):
         sel = Selector(response)
-        href = sel.xpath('//a[@class="top-nav-profile-dropdown"]/li[1]/a/@href').extract()[0]
+        href = sel.xpath('//ul[@id="top-nav-profile-dropdown"]/li[1]/a/@href').extract()[0]
         print('href----->', href)
-        cookie_jar = response.meta['cookie_jar']
-        request = Request(self.host_url + href, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
+        # 刷新cookie
+        cookie_jar = CookieJar()
+        cookie_jar.extract_cookies(response, response.request)
+        self.savecookies(self.cookie_jar._cookies)
+        request = Request(self.host_url + href, headers=self.headers, meta={'cookie_jar': cookie_jar},
                           callback=self.people_page)
         cookie_jar.add_cookie_header(request)
+        return request
         pass
 
     def people_page(self, response):
         sel = Selector(response)
         # 关注和被关注
-        following = sel.xpath('//div{@class="zm-profile-side-following zg-clear"]')
+        following = sel.xpath('//div[@class="zm-profile-side-following zg-clear"]')
         followees_followers = following.xpath('.//strong/text()').extract()
         count = 0
         for follow in followees_followers:
             count += int(follow)
         if count == 0:
-            print('这是一个僵尸号:', response.url.replace(self.host_url + '/people/'))
+            print('这是一个僵尸号:', response.url.replace(self.host_url + '/people/', ''))
             return
-        topics = sel.xpath('//a[@class="zg-link-litblue"]/@href').extract()[0]
-        print('topics->>>>>>>>>>>', topics)
-        cookie_jar = response.meta['cookie_jar']
+        topics_link = sel.xpath('//a[@class="zg-link-litblue"]/@href').extract()[1]
+        print('topics->>>>>>>>>>>', topics_link)
+        # cookie_jar = response.meta['cookie_jar']
         # 打开关注的话题
-        request = Request(self.host_url + topics, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
-                          callback=self.topics_page)
-        cookie_jar.add_cookie_header(request)
-        yield request
+        self.webdriver_addcookies(topics_link)
+        browerHeight = self.driver.execute_script('return document.body.scrollHeight;')
+        while True:
+            # do the scrolling
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)  # 等待加载完成数据
+            scrollHeight = self.driver.execute_script('return document.body.scrollHeight;')
+            if browerHeight == scrollHeight:
+                break
+            browerHeight = scrollHeight
+
+        topic_list = self.driver.find_element_by_id('zh-profile-topic-list')
+        item = ZhihuItem()
+        item['name'] = self.driver.find_element_by_xpath('//span[@class="name"]').text
+        item['business'] = self.driver.find_element_by_xpath('//span[@class="business item"]').get_attribute('title')
+        item['location'] = self.driver.find_element_by_xpath('//span[@class="location item"]').text
+        topics = []
+        topic_divs = topic_list.find_elements_by_xpath(
+            './/div[@class="zm-profile-section-item zg-clear zm-editable-status-normal"]')
+        for topic in topic_divs:
+            section = topic.find_element_by_xpath('.//div[@class="zm-profile-section-main"]')
+            links = section.find_elements_by_tag_name('a')
+            topicdata = links[1]
+            topic_id = os.path.basename(topicdata.get_attribute('href'))
+            topic_name = topicdata.find_element_by_tag_name('strong').text
+            topic_answers = int(links.pop().text.replace(' 个回答', ''))
+            topics.append({'topic_id': topic_id, 'topic_name': topic_name, 'topic_answers': topic_answers})
+        item['topics'] = topics
+        yield item
+        # request = Request(self.host_url + topics, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
+        #                   callback=self.topics_page)
+        # cookie_jar.add_cookie_header(request)
+        # yield request
 
         # todo 递归找出所有有效用户关注的数据
-        followings = following.xpath('.//div/@href').extract()
-        followees = followings[0]  # 关注的链接
-        followers = followings[1]  # 被关注
+        # followings = following.xpath('.//a/@href').extract()
+        # followees = followings[0]  # 关注的链接
+        # yield self.cookiejar_addcookies(response, followees, self.followees_page)
+        # followers = followings[1]  # 被关注
+        # yield self.cookiejar_addcookies(response, followers, self.followees_page)
         pass
 
-    def topics_page(self, response):
+    def webdriver_addcookies(self, url):
+        for key in self.login_cookies_dict:
+            cookie = self.login_cookies_dict[key]
+            self.driver.add_cookie({k: cookie[k] for k in ['name', 'value', 'domain', 'path']})
+        self.driver.get(self.host_url + url)
+        pass
+
+    def cookiejar_addcookies(self, response, url, callback):
+        cookie_jar = response.meta['cookie_jar']
+        request = Request(self.host_url + url, headers=self.headers, meta={'cookie_jar': cookie_jar},
+                          callback=callback)
+        cookie_jar.add_cookie_header(request)
+        yield request
+        pass
+
+    def followees_page(self, response):
         sel = Selector(response)
-        topic_items = sel.xpath('//div[@class="zm-profile-section-item zg-clear zm-editable-status-normal"]')
-        for item in topic_items:
-            topic = item.xpath('.//a/[@data-hovercard]')[0]
-            topic_id = topic.xpath('./@href').extract()[0].replace('/topic/')
-            topic_name = topic.xpath('.//strong').extract()[0]
-            print(topic_name, topic_id)
+        peoplelinks = sel.xpath('//a[@class="zm-item-link-avatar"]/@href').extract()
+        for link in peoplelinks:
+            yield self.cookiejar_addcookies(response, url=link, callback=self.people_page)
         pass

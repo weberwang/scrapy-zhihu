@@ -8,13 +8,15 @@
 #     http://doc.scrapy.org/en/latest/topics/settings.html
 #     http://scrapy.readthedocs.org/en/latest/topics/downloader-middleware.html
 #     http://scrapy.readthedocs.org/en/latest/topics/spider-middleware.html
-USER_NAME = '' #用户名
-PASS_WORD = '' #密码
 
 BOT_NAME = 'zhihu'
 
 SPIDER_MODULES = ['zhihu.spiders']
 NEWSPIDER_MODULE = 'zhihu.spiders'
+
+FEED_EXPORTERS = {
+    'jsonlines': 'scrapy.contrib.exporter.JsonLinesItemExporter'
+}
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
