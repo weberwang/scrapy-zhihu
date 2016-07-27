@@ -9,3 +9,18 @@
 class ZhihuPipeline(object):
     def process_item(self, item, spider):
         return item
+
+
+import json
+
+
+class JsonWriterPipeline(object):
+    def __init__(self):
+        # 写完之后需要在开头和结尾分别加上 [和]才是合法的json格式
+        self.file = open('users.json', 'a')
+
+    def process_item(self, item, spider):
+        line = json.dumps(dict(item)) + ','
+        #中文写入编码问题
+        self.file.write(line.encode('latin-1').decode('unicode_escape'))
+        return item

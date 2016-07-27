@@ -1,3 +1,5 @@
+#coding=utf-8
+
 import zhihu.settings as projectsetting
 from zhihu.items import ZhihuItem
 
@@ -13,13 +15,11 @@ import os
 import json
 import time
 import sys
+from urllib.parse import unquote
 
 from http.cookiejar import Cookie
 
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 if sys.platform == 'win32':
     from win32api import GetSystemMetrics
@@ -49,6 +49,8 @@ class zhihuCrawler(CrawlSpider):
     driver = None
     login_cookies = None
     login_cookies_dict = None
+
+    # handle_httpstatus_list = [302]
 
     # rules = (
     #     Rule(SgmlLinkExtractor(allow=(r'/question/\d+',)), follow=True),
@@ -234,13 +236,18 @@ class zhihuCrawler(CrawlSpider):
         pass
 
     def parse_page(self, response):
+        with open('users.json', 'w') as user:
+            user.write('')
         sel = Selector(response)
         href = sel.xpath('//ul[@id="top-nav-profile-dropdown"]/li[1]/a/@href').extract()[0]
         print('href----->', href)
         # 刷新cookie
-        cookie_jar = CookieJar()
-        cookie_jar.extract_cookies(response, response.request)
-        self.savecookies(self.cookie_jar._cookies)
+        if response.meta['cookie_jar']:
+            cookie_jar = response.meta['cookie_jar']
+        else:
+            cookie_jar = CookieJar()
+            cookie_jar.extract_cookies(response, response.request)
+        self.savecookies(cookie_jar._cookies)
         request = Request(self.host_url + href, headers=self.headers, meta={'cookie_jar': cookie_jar},
                           callback=self.people_page)
         cookie_jar.add_cookie_header(request)
@@ -248,8 +255,78 @@ class zhihuCrawler(CrawlSpider):
         pass
 
     def people_page(self, response):
+        yield self.parse_item(response)
         sel = Selector(response)
         # 关注和被关注
+        following = sel.xpath('//div[@class="zm-profile-side-following zg-clear"]')
+        # request = Request(self.host_url + topics, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
+        #                   callback=self.topics_page)
+        # cookie_jar.add_cookie_header(request)
+        # yield request
+
+        # todo 递归找出所有有效用户关注的数据
+        followings = following.xpath('.//a/@href').extract()
+        for follow_link in followings:
+            # yield self.cookiejar_addcookies(response, url=follow_link, callback=self.followees_page) #这样调用会重定向 还没有决解
+            self.webdriver_addcookies(follow_link)
+            browerHeight = self.driver.execute_script('return document.body.scrollHeight;')
+            while True:
+                # do the scrolling
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1)  # 等待加载完成数据
+                scrollHeight = self.driver.execute_script('return document.body.scrollHeight;')
+                if browerHeight == scrollHeight:
+                    break
+                browerHeight = scrollHeight
+            peoplelinks = self.driver.find_elements_by_xpath('//a[@class="zm-item-link-avatar"]')
+            for link in peoplelinks:
+                href = link.get_attribute('href')
+                yield self.cookiejar_addcookies(response, url=href, callback=self.people_page)
+            pass
+        # followees = followings[0]  # 关注的链接
+        # followers = followings[1]  # 被关注
+        pass
+
+    def webdriver_addcookies(self, url):
+        for key in self.login_cookies_dict:
+            cookie = self.login_cookies_dict[key]
+            self.driver.add_cookie({k: cookie[k] for k in ['name', 'value', 'domain', 'path']})
+        if url.find('http://') > -1 or url.find('https://') > -1:
+            pass
+        else:
+            url = self.host_url + url
+        self.driver.get(url)
+        pass
+
+    def cookiejar_addcookies(self, response, url, callback):
+        cookie_jar = response.meta['cookie_jar']
+        if url.find('http://') > -1 or url.find('https://') > -1:
+            pass
+        else:
+            url = self.host_url + url
+        request = Request(url, headers=self.headers,
+                          dont_filter=True,
+                          meta={'cookie_jar': cookie_jar, 'dont_redirect': True, 'handle_httpstatus_list': [302]},
+                          callback=callback)
+        cookie_jar.add_cookie_header(request)
+        return request
+        pass
+
+    def followees_page(self, response):
+        if response.status in (302,) and 'Location' in response.headers:
+            url = unquote(response.headers['Location'].decode('utf-8'))
+            self.logger.debug(
+                "(followees_page) Location header: %r" % response.urljoin(url))
+            yield self.cookiejar_addcookies(response, response.urljoin(url),
+                                            self.followees_page)
+        sel = Selector(response)
+        peoplelinks = sel.xpath('//a[@class="zm-item-link-avatar"]/@href').extract()
+        for link in peoplelinks:
+            yield self.cookiejar_addcookies(response, url=link, callback=self.people_page)
+        pass
+
+    def parse_item(self, response):
+        sel = Selector(response)
         following = sel.xpath('//div[@class="zm-profile-side-following zg-clear"]')
         followees_followers = following.xpath('.//strong/text()').extract()
         count = 0
@@ -258,7 +335,10 @@ class zhihuCrawler(CrawlSpider):
         if count == 0:
             print('这是一个僵尸号:', response.url.replace(self.host_url + '/people/', ''))
             return
-        topics_link = sel.xpath('//a[@class="zg-link-litblue"]/@href').extract()[1]
+        topics_link = sel.xpath('//a[@class="zg-link-litblue"]/@href').extract()
+        for topics in topics_link:
+            if topics.find('topics') > -1:
+                topics_link = topics
         print('topics->>>>>>>>>>>', topics_link)
         # cookie_jar = response.meta['cookie_jar']
         # 打开关注的话题
@@ -275,14 +355,20 @@ class zhihuCrawler(CrawlSpider):
 
         topic_list = self.driver.find_element_by_id('zh-profile-topic-list')
         item = ZhihuItem()
-        item['name'] = self.driver.find_element_by_xpath('//span[@class="name"]').text
-        item['business'] = self.driver.find_element_by_xpath('//span[@class="business item"]').get_attribute('title')
-        item['location'] = self.driver.find_element_by_xpath('//span[@class="location item"]').text
+        item['name'] = self.driver.find_element_by_xpath('//a[@class="name"]').text
+        try:
+            item['business'] = self.driver.find_element_by_xpath('//span[@class="business item"]').get_attribute(
+                'title')
+        except:
+            item['business'] = ''
+        try:
+            item['location'] = self.driver.find_element_by_xpath('//span[@class="location item"]').text
+        except:
+            item['location'] = ''
         topics = []
-        topic_divs = topic_list.find_elements_by_xpath(
-            './/div[@class="zm-profile-section-item zg-clear zm-editable-status-normal"]')
+        topic_divs = topic_list.find_elements_by_xpath('./div')
         for topic in topic_divs:
-            section = topic.find_element_by_xpath('.//div[@class="zm-profile-section-main"]')
+            section = topic.find_element_by_xpath('./div[@class="zm-profile-section-main"]')
             links = section.find_elements_by_tag_name('a')
             topicdata = links[1]
             topic_id = os.path.basename(topicdata.get_attribute('href'))
@@ -290,38 +376,9 @@ class zhihuCrawler(CrawlSpider):
             topic_answers = int(links.pop().text.replace(' 个回答', ''))
             topics.append({'topic_id': topic_id, 'topic_name': topic_name, 'topic_answers': topic_answers})
         item['topics'] = topics
-        yield item
-        # request = Request(self.host_url + topics, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
-        #                   callback=self.topics_page)
-        # cookie_jar.add_cookie_header(request)
-        # yield request
-
-        # todo 递归找出所有有效用户关注的数据
-        # followings = following.xpath('.//a/@href').extract()
-        # followees = followings[0]  # 关注的链接
-        # yield self.cookiejar_addcookies(response, followees, self.followees_page)
-        # followers = followings[1]  # 被关注
-        # yield self.cookiejar_addcookies(response, followers, self.followees_page)
-        pass
-
-    def webdriver_addcookies(self, url):
-        for key in self.login_cookies_dict:
-            cookie = self.login_cookies_dict[key]
-            self.driver.add_cookie({k: cookie[k] for k in ['name', 'value', 'domain', 'path']})
-        self.driver.get(self.host_url + url)
-        pass
-
-    def cookiejar_addcookies(self, response, url, callback):
-        cookie_jar = response.meta['cookie_jar']
-        request = Request(self.host_url + url, headers=self.headers, meta={'cookie_jar': cookie_jar},
-                          callback=callback)
-        cookie_jar.add_cookie_header(request)
-        yield request
-        pass
-
-    def followees_page(self, response):
-        sel = Selector(response)
-        peoplelinks = sel.xpath('//a[@class="zm-item-link-avatar"]/@href').extract()
-        for link in peoplelinks:
-            yield self.cookiejar_addcookies(response, url=link, callback=self.people_page)
-        pass
+        # 临时写入文件，方便查看
+        # item_pipeline 写完之后才能查看，数据量过大
+        # with codecs.open('users.json', 'a', encoding='utf-8') as user:
+        #     line = json.dumps(dict(item)) + ','
+        #     user.write(line.encode('latin-1').decode('unicode_escape'))
+        return item
