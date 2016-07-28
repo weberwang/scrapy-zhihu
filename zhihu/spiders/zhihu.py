@@ -1,4 +1,4 @@
-#coding=utf-8
+# coding=utf-8
 
 import zhihu.settings as projectsetting
 from zhihu.items import ZhihuItem
@@ -45,7 +45,7 @@ class zhihuCrawler(CrawlSpider):
 
     name = 'zhihu'
     _xsrf = ''
-    cookie_jar = CookieJar()
+    cookiejar = CookieJar()
     driver = None
     login_cookies = None
     login_cookies_dict = None
@@ -77,16 +77,15 @@ class zhihuCrawler(CrawlSpider):
         if expires < time.time():
             expires = False
             print('cookie过期')
-        print(cookies)
         if cookies and expires:
-            self.cookie_jar = CookieJar()
+            self.cookiejar = CookieJar()
             for key in cookies:
-                self.cookie_jar.set_cookie(cookies[key])
+                self.cookiejar.set_cookie(cookies[key])
             for url in self.start_urls:
                 requset = Request(url, headers=self.headers,
-                                  meta={'dont_merge_cookies': True, 'cookie_jar': self.cookie_jar},
+                                  meta={'dont_merge_cookies': True, 'cookiejar': 1},
                                   callback=self.parse_page)
-                self.cookie_jar.add_cookie_header(requset)
+                self.cookiejar.add_cookie_header(requset)
                 return [requset]
         _driver.get("https://www.zhihu.com/#signin")
         # wait = WebDriverWait(driver, 12)  # 等待
@@ -120,7 +119,6 @@ class zhihuCrawler(CrawlSpider):
             # todo 这个地方还需要在处理一下,不能直接下载验证码不然会被服务器刷新验证码
             captcha_url = input_wrapper.find_element_by_xpath('.//img').get_attribute('src')
             print('captcha_url---->', captcha_url)
-            # input_wrapper.screenshot('./captcha.png')
             _driver.close()
             return [Request(captcha_url, headers=self.headers, callback=self.download_captcha, meta={'_xsrf': _xsrf})]
         else:
@@ -139,9 +137,6 @@ class zhihuCrawler(CrawlSpider):
         return self.post_login(response.meta['_xsrf'], captcha)
 
     def post_login(self, _xsrf, captcha=None):
-        # sel = Selector(response)
-        # _xsrf = sel.xpath('//input[@name="_xsrf"]/@value').extract()[0]
-        # self.cookie_jar = response.meta.setdefault('cookie_jar', CookieJar())
         formdata = {'_xsrf': _xsrf,
                     'password': projectsetting.PASS_WORD,  # 你的密码
                     'captcha_type': 'cn',
@@ -162,13 +157,13 @@ class zhihuCrawler(CrawlSpider):
         print('content---->', body)
         if body.get('r') != 0:
             return
-        self.cookie_jar = response.meta.setdefault('cookie_jar', CookieJar())
-        self.cookie_jar.extract_cookies(response, response.request)
+        self.cookiejar = response.meta.setdefault('cookiejar', CookieJar())
+        self.cookiejar.extract_cookies(response, response.request)
+        self.savecookies(self.cookiejar._cookies)
         for url in self.start_urls:
             requset = Request(url, headers=self.headers,
-                              meta={'dont_merge_cookies': True, 'cookie_jar': self.cookie_jar},
+                              meta={'dont_merge_cookies': True, 'cookiejar': 1},
                               callback=self.parse_page)
-            self.cookie_jar.add_cookie_header(requset)
             yield requset
         pass
 
@@ -209,7 +204,6 @@ class zhihuCrawler(CrawlSpider):
             evalstr = 'Cookie({0})'.format(param)
             result[item[0]] = eval(evalstr)
         return result
-        # return {'.zhihu.com': {'/': result}}
 
     def getcookies(self):
         expires = 0
@@ -225,6 +219,7 @@ class zhihuCrawler(CrawlSpider):
             if cookiesstr == '' or cookiesstr == None:
                 return (None, 0)
             cookies = json.loads(cookiesstr)
+            self.login_cookies_dict = cookies
             self.login_cookies = self.dict2cookie(cookies)
             expires = 0
             if self.login_cookies:
@@ -241,16 +236,9 @@ class zhihuCrawler(CrawlSpider):
         sel = Selector(response)
         href = sel.xpath('//ul[@id="top-nav-profile-dropdown"]/li[1]/a/@href').extract()[0]
         print('href----->', href)
-        # 刷新cookie
-        if response.meta['cookie_jar']:
-            cookie_jar = response.meta['cookie_jar']
-        else:
-            cookie_jar = CookieJar()
-            cookie_jar.extract_cookies(response, response.request)
-        self.savecookies(cookie_jar._cookies)
-        request = Request(self.host_url + href, headers=self.headers, meta={'cookie_jar': cookie_jar},
+        cookiejar = response.meta['cookiejar']
+        request = Request(self.host_url + href, headers=self.headers, meta={'cookiejar': cookiejar},
                           callback=self.people_page)
-        cookie_jar.add_cookie_header(request)
         return request
         pass
 
@@ -259,10 +247,6 @@ class zhihuCrawler(CrawlSpider):
         sel = Selector(response)
         # 关注和被关注
         following = sel.xpath('//div[@class="zm-profile-side-following zg-clear"]')
-        # request = Request(self.host_url + topics, headers=self.headers, meta={'cookie_jar': self.cookie_jar},
-        #                   callback=self.topics_page)
-        # cookie_jar.add_cookie_header(request)
-        # yield request
 
         # todo 递归找出所有有效用户关注的数据
         followings = following.xpath('.//a/@href').extract()
@@ -280,7 +264,7 @@ class zhihuCrawler(CrawlSpider):
                 browerHeight = scrollHeight
             peoplelinks = self.driver.find_elements_by_xpath('//a[@class="zm-item-link-avatar"]')
             for link in peoplelinks:
-                href = link.get_attribute('href')
+                href = link.get_attribute('href') #某些用户的链接在这里找不到,待查找
                 yield self.cookiejar_addcookies(response, url=href, callback=self.people_page)
             pass
         # followees = followings[0]  # 关注的链接
@@ -299,16 +283,16 @@ class zhihuCrawler(CrawlSpider):
         pass
 
     def cookiejar_addcookies(self, response, url, callback):
-        cookie_jar = response.meta['cookie_jar']
+        cookiejar = response.meta['cookiejar']
         if url.find('http://') > -1 or url.find('https://') > -1:
             pass
         else:
             url = self.host_url + url
         request = Request(url, headers=self.headers,
                           dont_filter=True,
-                          meta={'cookie_jar': cookie_jar, 'dont_redirect': True, 'handle_httpstatus_list': [302]},
+                          meta={'cookiejar': cookiejar, 'dont_redirect': True, 'handle_httpstatus_list': [302]},
                           callback=callback)
-        cookie_jar.add_cookie_header(request)
+        # cookiejar.add_cookie_header(request)
         return request
         pass
 
@@ -340,7 +324,6 @@ class zhihuCrawler(CrawlSpider):
             if topics.find('topics') > -1:
                 topics_link = topics
         print('topics->>>>>>>>>>>', topics_link)
-        # cookie_jar = response.meta['cookie_jar']
         # 打开关注的话题
         self.webdriver_addcookies(topics_link)
         browerHeight = self.driver.execute_script('return document.body.scrollHeight;')
